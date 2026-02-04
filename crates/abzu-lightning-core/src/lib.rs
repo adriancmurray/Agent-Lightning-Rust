@@ -35,4 +35,7 @@ pub enum Error {
 
     #[error("Invalid span: {0}")]
     InvalidSpan(String),
+
+    #[error("State error: {0}")]
+    State(String),
 }

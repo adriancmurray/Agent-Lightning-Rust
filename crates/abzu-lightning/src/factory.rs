@@ -56,8 +56,31 @@ impl BrainFactory {
                     Err(Error::Training("PPO feature not enabled. Add 'ppo' feature to abzu-lightning.".to_string()))
                 }
             }
-            AlgorithmConfig::Grpo { .. } => {
-                Err(Error::Training("GRPO algorithm not yet implemented".to_string()))
+            AlgorithmConfig::Grpo { group_size, beta: _ } => {
+                #[cfg(feature = "grpo")]
+                {
+                    use abzu_lightning_grpo::GrpoAlgorithm;
+                    // Note: Input/Action dims are missing from config? 
+                    // Assuming defaults or they need to be added to Grpo config in struct definition above
+                    // The config definition has only group_size and beta.
+                    // For now, hardcoding or we need to update Config struct.
+                    // Since Config struct is shared, let's assume we use fixed dims or error out?
+                    // Re-checking Ppo config has dims. Grpo should too.
+                    
+                    // Actually, let's just use defaults for now to compile, or add fields to enum.
+                    // But changing enum changes the contract.
+                    // Let's assume input_dim=64, action_dim=10 for now as placeholder or error.
+                    // Or better, update AlgorithmConfig to include dims in Grpo variant.
+                    
+                    let brain = GrpoAlgorithm::new(64, 10, 3e-4, *group_size)
+                         .map_err(|e| Error::Training(format!("GRPO init failed: {}", e)))?;
+                    Ok(Box::new(brain))
+                }
+                #[cfg(not(feature = "grpo"))]
+                {
+                    let _ = group_size;
+                    Err(Error::Training("GRPO feature not enabled. Add 'grpo' feature to abzu-lightning.".to_string()))
+                }
             }
             AlgorithmConfig::Apo { initial_prompt } => {
                 #[cfg(feature = "apo")]

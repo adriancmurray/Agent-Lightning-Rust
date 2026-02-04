@@ -7,6 +7,7 @@ edition = "2021"
 abzu-lightning-core = { path = "../abzu-lightning-core" }
 abzu-lightning-ppo = { path = "../abzu-lightning-ppo", optional = true }
 abzu-lightning-apo = { path = "../abzu-lightning-apo", optional = true }
+abzu-lightning-grpo = { path = "../abzu-lightning-grpo", optional = true }
 
 # Utilities
 anyhow = "1.0"
@@ -17,14 +18,15 @@ tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 
 # Plugin Integration
-abzu-runtime = { path = "../../abzu-runtime", optional = true }
+# abzu-runtime = { path = "../../abzu-runtime", optional = true }
 async-trait = { version = "0.1", optional = true }
 
 [features]
 default = []
 ppo = ["dep:abzu-lightning-ppo"]
 apo = ["dep:abzu-lightning-apo"]
-plugin = ["abzu-runtime", "async-trait"]
+grpo = ["dep:abzu-lightning-grpo"]
+plugin = ["async-trait"]
 
 [dev-dependencies]
 tempfile = "3.0"

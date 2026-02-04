@@ -1,7 +1,7 @@
 use abzu_lightning_core::{LightningAlgorithm, Result, Error, Span, TrainingResult, LlmBackend};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 /// A trace of a single interaction
 #[derive(Debug, Clone)]
@@ -61,7 +61,7 @@ impl ApoAlgorithm {
 #[async_trait]
 impl LightningAlgorithm for ApoAlgorithm {
     async fn train(&mut self, spans: &[Span]) -> Result<Option<TrainingResult>> {
-        let mut new_failures = 0;
+        let mut _new_failures = 0;
 
         for span in spans {
             match span {
@@ -93,13 +93,9 @@ impl LightningAlgorithm for ApoAlgorithm {
                                 action: act.clone(),
                                 reward: r.reward,
                             });
-                            new_failures += 1;
+                            _new_failures += 1;
                         }
                     }
-                    // Reset state after reward? Usually yes strictly sequential
-                    // self.pending_obs = None;
-                    // self.pending_act = None; 
-                    // Keeping them assumes simple loop.
                 }
                 _ => {}
             }
