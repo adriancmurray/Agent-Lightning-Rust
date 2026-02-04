@@ -12,6 +12,8 @@ pub mod harness;
 
 #[cfg(feature = "plugin")]
 pub mod plugin;
+#[cfg(feature = "plugin")]
+pub use plugin::LightningPlugin;
 
 // Re-export new runtime components
 pub use factory::{BrainFactory, AlgorithmConfig};

@@ -3,7 +3,7 @@
 use crate::{
     LightningStore, Result, Span,
 };
-use abzu_runtime::plugins::{
+use abzu_plugin_api::{
     PluginManifest, PluginProvider, PluginStatus, SettingDefinition, SettingKind, StatusField,
 };
 use async_trait::async_trait;
