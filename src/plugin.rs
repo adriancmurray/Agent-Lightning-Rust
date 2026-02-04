@@ -1,8 +1,7 @@
 //! Abzu plugin integration for Lightning
 
 use crate::{
-    LightningStore, Result, Span, SpanCollector, TrainerConfig, 
-    algorithm::RewardAggregator,
+    LightningStore, Result, Span,
 };
 use abzu_runtime::plugins::{
     PluginManifest, PluginProvider, PluginStatus, SettingDefinition, SettingKind, StatusField,
@@ -181,6 +180,32 @@ impl PluginProvider for LightningPlugin {
             _ => None,
         }
     }
+
+    async fn call(&self, method: &str, params: Value) -> std::result::Result<Value, String> {
+        // Construct LightningRequest by injecting method field
+        let mut request_obj = params;
+        if let Value::Object(ref mut map) = request_obj {
+            map.insert("method".to_string(), Value::String(method.to_string()));
+        } else if method == "get_stats" && request_obj == Value::Null {
+             // Handle case where params is null (optional)
+             request_obj = serde_json::json!({
+                 "method": method
+             });
+        }
+        
+        // Deserialize proper request type
+        let request: LightningRequest = serde_json::from_value(request_obj)
+            .map_err(|e| format!("Invalid params for method {}: {}", method, e))?;
+
+        // Handle request
+        match self.handle_rpc(request).await {
+            Ok(response) => {
+                // Serialize response to Value
+                serde_json::to_value(response).map_err(|e| format!("Serialization error: {}", e))
+            }
+            Err(e) => Err(format!("Lightning error: {}", e)),
+        }
+    }
 }
 
 /// Training statistics
@@ -278,5 +303,44 @@ mod tests {
         let req = LightningRequest::QueryTask { task_id: "test-task".to_string() };
         let res = plugin.handle_rpc(req).await.unwrap();
         assert!(matches!(res, LightningResponse::Spans(_)));
+    }
+
+    #[tokio::test]
+    async fn test_rpc_generic_call() {
+        let store = Arc::new(LightningStore::memory().unwrap());
+        let plugin = LightningPlugin::new(store);
+        
+        // Test emit_span via generic call
+        let span_data = json!({
+            "span": {
+                "type": "observation",
+                "id": "test-id",
+                "timestamp": "2023-01-01T00:00:00Z",
+                "data": {"foo": "bar"}
+            }
+        });
+        
+        // Note: Generic call injects "method": "emit_span" into the JSON
+        // but we need to match LightningRequest deserialization.
+        // LightningRequest::EmitSpan { span: Span }
+        // JSON: { "method": "emit_span", "span": ... }
+        
+        // We pass "emit_span" as method, and params as object containing "span"
+        let res = plugin.call("emit_span", span_data).await;
+        // It might fail if Span deserialization is strict or my mock JSON is lazy
+        // Span struct has strict fields? 
+        // Let's use a cleaner params construction
+        
+        let span = Span::Observation(
+             ObservationSpan::new(json!({"test": true})).with_task("t1")
+        );
+        let params = json!({ "span": span });
+        
+        let res = plugin.call("emit_span", params).await;
+        assert!(res.is_ok());
+        
+        // Test get_stats
+        let res = plugin.call("get_stats", Value::Null).await;
+        assert!(res.is_ok());
     }
 }

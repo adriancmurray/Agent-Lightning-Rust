@@ -18,7 +18,7 @@ pub use collector::SpanCollector;
 pub use plugin::{LightningPlugin, LightningRequest, LightningResponse, TrainingStats};
 pub use span::{ActionSpan, ObservationSpan, RewardSpan, Span};
 pub use store::LightningStore;
-pub use trainer::Trainer;
+pub use trainer::{Trainer, TrainerConfig};
 
 /// Result type alias
 pub type Result<T> = std::result::Result<T, Error>;
