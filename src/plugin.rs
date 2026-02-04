@@ -41,34 +41,49 @@ impl LightningPlugin {
 
     /// Emit a span (convenience method for RPC)
     pub async fn emit_span(&self, span: Span) -> Result<()> {
-        self.store.insert_span(&span)
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            store.insert_span(&span)
+        }).await.map_err(|e| crate::Error::Training(format!("Task join error: {}", e)))??;
+        Ok(())
     }
 
     /// Query task spans
     pub async fn query_task(&self, task_id: &str) -> Result<Vec<Span>> {
-        self.store.query_task(task_id)
+        let store = self.store.clone();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            store.query_task(&task_id)
+        }).await.map_err(|e| crate::Error::Training(format!("Task join error: {}", e)))?
     }
 
     /// Query agent spans
     pub async fn query_agent(&self, agent_id: &str) -> Result<Vec<Span>> {
-        self.store.query_agent(agent_id)
+        let store = self.store.clone();
+        let agent_id = agent_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            store.query_agent(&agent_id)
+        }).await.map_err(|e| crate::Error::Training(format!("Task join error: {}", e)))?
     }
 
     /// Get training statistics
     pub async fn get_stats(&self) -> Result<TrainingStats> {
-        let tasks = self.store.list_tasks()?;
-        let agents = self.store.list_agents()?;
-        
-        let mut total_spans = 0;
-        for task in &tasks {
-            total_spans += self.store.query_task(task)?.len();
-        }
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            let tasks = store.list_tasks()?;
+            let agents = store.list_agents()?;
+            
+            let mut total_spans = 0;
+            for task in &tasks {
+                total_spans += store.query_task(task)?.len();
+            }
 
-        Ok(TrainingStats {
-            total_tasks: tasks.len(),
-            total_agents: agents.len(),
-            total_spans,
-        })
+            Ok(TrainingStats {
+                total_tasks: tasks.len(),
+                total_agents: agents.len(),
+                total_spans,
+            })
+        }).await.map_err(|e| crate::Error::Training(format!("Task join error: {}", e)))?
     }
 }
 

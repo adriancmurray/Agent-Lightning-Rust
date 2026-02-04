@@ -27,13 +27,13 @@ impl LightningStore {
     /// Insert a span into the store
     pub fn insert_span(&self, span: &Span) -> Result<()> {
         // Generate key: timestamp_spanid
-        let key = format!(
-            "{}_{}",
-            span.timestamp().timestamp_nanos_opt().unwrap_or(0),
-            span.id()
-        );
+        // Use big-endian for correct lex sorting of timestamps if using raw bytes, 
+        // but string format is also sortable if fixed width. 
+        // Using nanoseconds ensures high precision.
+        let ts = span.timestamp().timestamp_nanos_opt().unwrap_or(0);
+        let key = format!("{:019}_{}", ts, span.id());
 
-        // Serialize span
+        // Serialize span using serde_json because bincode struggles with serde_json::Value
         let value = serde_json::to_vec(&span)?;
 
         // Insert into main spans tree
@@ -42,15 +42,15 @@ impl LightningStore {
         // Index by task_id if present
         if let Some(task_id) = span.task_id() {
             let task_tree = self.db.open_tree(format!("task:{}", task_id))?;
-            let span_key = format!("{}", span.id());
-            task_tree.insert(span_key.as_bytes(), key.as_bytes())?;
+            // Use time-ordered key for index
+            task_tree.insert(key.as_bytes(), key.as_bytes())?;
         }
 
         // Index by agent_id if present
         if let Some(agent_id) = span.agent_id() {
             let agent_tree = self.db.open_tree(format!("agent:{}", agent_id))?;
-            let span_key = format!("{}", span.id());
-            agent_tree.insert(span_key.as_bytes(), key.as_bytes())?;
+            // Use time-ordered key for index
+            agent_tree.insert(key.as_bytes(), key.as_bytes())?;
         }
 
         Ok(())
@@ -58,19 +58,36 @@ impl LightningStore {
 
     /// Query all spans for a specific task
     pub fn query_task(&self, task_id: &str) -> Result<Vec<Span>> {
+        self.query_task_since(task_id, None)
+    }
+
+    /// Query spans for a task since a specific cursor (timestamp, uuid)
+    pub fn query_task_since(
+        &self, 
+        task_id: &str, 
+        cursor: Option<(DateTime<Utc>, uuid::Uuid)>
+    ) -> Result<Vec<Span>> {
         let task_tree = self.db.open_tree(format!("task:{}", task_id))?;
         let mut spans = Vec::new();
 
-        for item in task_tree.iter() {
-            let (_span_id_key, main_key) = item?;
+        let start_key = if let Some((dt, id)) = cursor {
+            let ts = dt.timestamp_nanos_opt().unwrap_or(0);
+            // Start strictly after the cursor: append a byte larger than any valid key suffix
+            // or just append \0 if we want to separate? 
+            // format! ends with uuid. appending \0 makes it longer, which is > if prefix matches.
+            // Wait, "a" < "a\0". Yes.
+            format!("{:019}_{}\0", ts, id) 
+        } else {
+            "".to_string()
+        };
+
+        for item in task_tree.range(start_key.as_bytes()..) {
+            let (_index_key, main_key) = item?;
             if let Some(span_data) = self.db.get(&main_key)? {
                 let span: Span = serde_json::from_slice(&span_data)?;
                 spans.push(span);
             }
         }
-
-        // Sort by timestamp
-        spans.sort_by_key(|s| s.timestamp());
 
         Ok(spans)
     }
@@ -81,15 +98,12 @@ impl LightningStore {
         let mut spans = Vec::new();
 
         for item in agent_tree.iter() {
-            let (_span_id_key, main_key) = item?;
+            let (_index_key, main_key) = item?;
             if let Some(span_data) = self.db.get(&main_key)? {
                 let span: Span = serde_json::from_slice(&span_data)?;
                 spans.push(span);
             }
         }
-
-        // Sort by timestamp
-        spans.sort_by_key(|s| s.timestamp());
 
         Ok(spans)
     }
@@ -100,8 +114,12 @@ impl LightningStore {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Vec<Span>> {
-        let start_key = format!("{}_", start.timestamp_nanos_opt().unwrap_or(0));
-        let end_key = format!("{}_", end.timestamp_nanos_opt().unwrap_or(i64::MAX));
+        let start_ts = start.timestamp_nanos_opt().unwrap_or(0);
+        let end_ts = end.timestamp_nanos_opt().unwrap_or(i64::MAX);
+        
+        // Keys are formatted as {:019}_{uuid}
+        let start_key = format!("{:019}_", start_ts);
+        let end_key = format!("{:019}_\x7f", end_ts); // \x7f is higher than any uuid char
 
         let mut spans = Vec::new();
 

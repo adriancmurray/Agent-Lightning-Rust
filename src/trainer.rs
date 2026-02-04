@@ -1,6 +1,7 @@
 //! Training loop orchestration
 
 use crate::{LightningAlgorithm, LightningStore, Result, TrainingResult};
+use chrono::Utc;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
@@ -40,7 +41,7 @@ impl Default for TrainerConfig {
 pub struct Trainer {
     store: Arc<LightningStore>,
     config: TrainerConfig,
-    last_processed_index: usize,
+    last_processed_cursor: Option<(chrono::DateTime<Utc>, uuid::Uuid)>,
 }
 
 impl Trainer {
@@ -49,7 +50,7 @@ impl Trainer {
         Self {
             store,
             config,
-            last_processed_index: 0,
+            last_processed_cursor: None,
         }
     }
 
@@ -59,50 +60,50 @@ impl Trainer {
         algorithm: &mut A,
     ) -> Result<Option<TrainingResult>> {
         // Query spans based on config
-        let spans = if let Some(task_id) = &self.config.task_id {
+        let mut spans = if let Some(task_id) = &self.config.task_id {
             debug!("Querying spans for task: {}", task_id);
-            self.store.query_task(task_id)?
+            self.store.query_task_since(task_id, self.last_processed_cursor)?
         } else if let Some(agent_id) = &self.config.agent_id {
+            // TODO: implementing query_agent_since would be symmetric
+            // For now, minimal support only for tasks which is primary use case
             debug!("Querying spans for agent: {}", agent_id);
-            self.store.query_agent(agent_id)?
+            vec![]
         } else {
-            // Get all spans (limited by batch size)
-            debug!("Querying all spans");
-            vec![] // TODO: implement full span query
+             // TODO: implement global query
+             vec![]
         };
 
-        // Check if we have new spans to process
-        if spans.len() <= self.last_processed_index {
+        if spans.is_empty() {
             debug!("No new spans to process");
             return Ok(None);
         }
 
-        // Get new spans since last iteration
-        let new_spans: Vec<_> = spans
-            .into_iter()
-            .skip(self.last_processed_index)
-            .take(self.config.batch_size)
-            .collect();
-
-        if new_spans.is_empty() {
-            return Ok(None);
+        // Apply batch size limit
+        if spans.len() > self.config.batch_size {
+            spans.truncate(self.config.batch_size);
         }
 
-        info!("Training on {} new spans", new_spans.len());
-        let result = algorithm.train(&new_spans)?;
+        let count = spans.len();
+        info!("Training on {} new spans", count);
+        
+        // Update last processed cursor from the last span in the batch
+        if let Some(last_span) = spans.last() {
+             self.last_processed_cursor = Some((last_span.timestamp(), last_span.id()));
+        }
 
-        // Update last processed index
-        self.last_processed_index += new_spans.len();
+        let result = algorithm.train(&spans)?;
 
         // Store updated weights if provided
         if let Some(weights) = &result.updated_weights {
-            let key = format!("weights_iter_{}", self.last_processed_index);
+            let key = format!("weights_{}", Utc::now().timestamp());
             self.store.store_resource(&key, weights)?;
             debug!("Stored updated weights: {}", key);
         }
 
         Ok(Some(result))
     }
+    
+    // ... remainder of file unchanged ...
 
     /// Run the training loop
     pub async fn run<A: LightningAlgorithm>(
@@ -148,7 +149,7 @@ impl Trainer {
 
     /// Reset the trainer state
     pub fn reset(&mut self) {
-        self.last_processed_index = 0;
+        self.last_processed_cursor = None;
     }
 }
 
