@@ -13,13 +13,13 @@ const ENTROPY_COEF: f32 = 0.01;
 // KL penalty is often used in GRPO but we stick to PPO-clip style for now
 
 pub struct GrpoAlgorithm {
-    vars: VarMap,
+    _vars: VarMap,
     model: Actor,
     optimizer: AdamW,
     device: Device,
     input_dim: usize,
-    action_dim: usize,
-    group_size: usize, 
+    _action_dim: usize,
+    _group_size: usize, 
 }
 
 impl GrpoAlgorithm {
@@ -45,13 +45,13 @@ impl GrpoAlgorithm {
             .map_err(|e| Error::Training(format!("Optimizer creation failed: {}", e)))?;
 
         Ok(Self {
-            vars,
+            _vars: vars,
             model,
             optimizer,
             device,
             input_dim,
-            action_dim,
-            group_size,
+            _action_dim: action_dim,
+            _group_size: group_size,
         })
     }
 
