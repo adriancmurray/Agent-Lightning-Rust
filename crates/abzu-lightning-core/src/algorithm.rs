@@ -73,38 +73,41 @@ pub trait LightningAlgorithm: Send + Sync {
 /// Basic reward aggregation algorithm (for initial implementation)
 #[derive(Debug, Clone)]
 pub struct RewardAggregator {
-    total_reward: f64,
-    reward_count: usize,
+    window_size: Option<usize>,
+    rewards: std::collections::VecDeque<f64>,
+    sum: f64,
 }
 
 impl RewardAggregator {
-    pub fn new() -> Self {
+    /// Create a new aggregator with optional sliding window size
+    pub fn new(window_size: Option<usize>) -> Self {
         Self {
-            total_reward: 0.0,
-            reward_count: 0,
+            window_size,
+            rewards: std::collections::VecDeque::new(),
+            sum: 0.0,
         }
     }
 
     pub fn mean_reward(&self) -> f64 {
-        if self.reward_count == 0 {
+        if self.rewards.is_empty() {
             0.0
         } else {
-            self.total_reward / self.reward_count as f64
+            self.sum / self.rewards.len() as f64
         }
     }
 
     pub fn total_reward(&self) -> f64 {
-        self.total_reward
+        self.sum
     }
 
     pub fn count(&self) -> usize {
-        self.reward_count
+        self.rewards.len()
     }
 }
 
 impl Default for RewardAggregator {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -115,18 +118,28 @@ impl LightningAlgorithm for RewardAggregator {
 
         for span in spans {
             if let Span::Reward(reward_span) = span {
-                local_total += reward_span.reward;
+                let reward = reward_span.reward;
+                local_total += reward;
                 local_count += 1;
-                self.total_reward += reward_span.reward;
-                self.reward_count += 1;
+                
+                self.rewards.push_back(reward);
+                self.sum += reward;
+
+                if let Some(limit) = self.window_size {
+                    while self.rewards.len() > limit {
+                        if let Some(popped) = self.rewards.pop_front() {
+                            self.sum -= popped;
+                        }
+                    }
+                }
             }
         }
 
         let result = TrainingResult::new()
             .with_metric("mean_reward", self.mean_reward())
-            .with_metric("total_reward", self.total_reward)
+            .with_metric("total_reward", self.sum)
             .with_metric("batch_mean_reward", if local_count > 0 { local_total / local_count as f64 } else { 0.0 })
-            .with_metric("reward_count", self.reward_count as f64)
+            .with_metric("reward_window_count", self.rewards.len() as f64)
             .with_spans_processed(spans.len());
 
         Ok(result)
@@ -138,8 +151,8 @@ impl LightningAlgorithm for RewardAggregator {
     }
 
     fn reset(&mut self) -> Result<()> {
-        self.total_reward = 0.0;
-        self.reward_count = 0;
+        self.rewards.clear();
+        self.sum = 0.0;
         Ok(())
     }
 }
@@ -152,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_reward_aggregator() {
-        let mut algo = RewardAggregator::new();
+        let mut algo = RewardAggregator::default();
 
         let spans = vec![
             Span::Observation(ObservationSpan::new(json!({}))),
@@ -171,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_algorithm_reset() {
-        let mut algo = RewardAggregator::new();
+        let mut algo = RewardAggregator::default();
         let spans = vec![Span::Reward(RewardSpan::new(1.0))];
 
         algo.train(&spans).unwrap();

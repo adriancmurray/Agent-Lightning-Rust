@@ -1,21 +1,16 @@
-//! Agent Lightning - Rust port of Microsoft's Agent Lightning RL framework
+//! Core components for Agent Lightning
 //!
-//! Provides environment-independent reinforcement learning training through
-//! structured span recording, storage, and algorithm interfaces.
+//! Contains foundational types: Span, Store, Trainer, and Algorithm traits.
 
 pub mod algorithm;
 pub mod collector;
-#[cfg(feature = "plugin")]
-pub mod plugin;
 pub mod span;
 pub mod store;
 pub mod trainer;
 
-// Re-export main types
+// Re-export core types
 pub use algorithm::{LightningAlgorithm, TrainingResult};
 pub use collector::SpanCollector;
-#[cfg(feature = "plugin")]
-pub use plugin::{LightningPlugin, LightningRequest, LightningResponse, TrainingStats};
 pub use span::{ActionSpan, ObservationSpan, RewardSpan, Span};
 pub use store::LightningStore;
 pub use trainer::{Trainer, TrainerConfig};

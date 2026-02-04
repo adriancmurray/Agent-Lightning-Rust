@@ -55,7 +55,7 @@ impl Trainer {
     }
 
     /// Run a single training iteration
-    pub async fn train_iteration<A: LightningAlgorithm>(
+    pub async fn train_iteration<A: LightningAlgorithm + ?Sized>(
         &mut self,
         algorithm: &mut A,
     ) -> Result<Option<TrainingResult>> {
@@ -179,7 +179,7 @@ mod tests {
         };
 
         let mut trainer = Trainer::new(store.clone(), config);
-        let mut algo = RewardAggregator::new();
+        let mut algo = RewardAggregator::default();
 
         // First iteration should process 3 spans
         let result = trainer.train_iteration(&mut algo).await.unwrap();
@@ -218,7 +218,7 @@ mod tests {
         };
 
         let mut trainer = Trainer::new(store.clone(), config);
-        let mut algo = RewardAggregator::new();
+        let mut algo = RewardAggregator::default();
 
         let results = trainer.run(&mut algo).await.unwrap();
         assert_eq!(results.len(), 3);
