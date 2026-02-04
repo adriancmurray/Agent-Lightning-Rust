@@ -13,13 +13,13 @@ const ENTROPY_COEF: f32 = 0.01;
 const EPOCHS: usize = 4;
 
 pub struct PpoAlgorithm {
-    vars: VarMap,
+    _vars: VarMap,
     model: ActorCritic,
     optimizer: AdamW,
     device: Device,
-    clip_ratio: f64, // Config
+    clip_ratio: f64,
     input_dim: usize,
-    action_dim: usize,
+    _action_dim: usize,
 }
 
 impl PpoAlgorithm {
@@ -54,13 +54,13 @@ impl PpoAlgorithm {
             .map_err(|e| Error::Training(format!("Optimizer creation failed: {}", e)))?;
 
         Ok(Self {
-            vars,
+            _vars: vars,
             model,
             optimizer,
             device,
             clip_ratio: clip_range,
             input_dim,
-            action_dim,
+            _action_dim: action_dim,
         })
     }
 
@@ -98,7 +98,6 @@ impl PpoAlgorithm {
                          rew_vec[last_idx] += r.reward as f32;
                     }
                 }
-                _ => {}
             }
         }
         
@@ -137,7 +136,7 @@ impl PpoAlgorithm {
 
     /// Calculate log probs for specific actions using one-hot encoding
     fn get_log_probs(&self, logits: &Tensor, actions: &Tensor) -> std::result::Result<Tensor, Error> {
-        let n_batch = logits.dim(0).map_err(|e| Error::Training(e.to_string()))?;
+        let _n_batch = logits.dim(0).map_err(|e| Error::Training(e.to_string()))?;
         // actions is [B], logits is [B, A]
         
         // One-hot encode actions
@@ -160,6 +159,7 @@ impl PpoAlgorithm {
     }
 }
 
+#[derive(Debug)]
 struct Batch {
     obs: Tensor,
     act: Tensor,
@@ -213,15 +213,18 @@ impl LightningAlgorithm for PpoAlgorithm {
         }
         
         // Tensorize
-        let adv_tensor = Tensor::from_vec(advantages, (batch.size,), &self.device).map_err(|e| Error::Training(e.to_string()))?;
+        let adv_tensor = Tensor::from_vec(advantages.clone(), (batch.size,), &self.device).map_err(|e| Error::Training(e.to_string()))?;
         let ret_tensor = Tensor::from_vec(returns, (batch.size,), &self.device).map_err(|e| Error::Training(e.to_string()))?;
 
-        // Normalize Advantages
-        let adv_mean = adv_tensor.mean_all().map_err(|e| Error::Training(e.to_string()))?;
-        let adv_std = adv_tensor.var(0).map_err(|e| Error::Training(e.to_string()))?.sqrt().map_err(|e| Error::Training(e.to_string()))?;
-        // Add small epsilon to std prevents NaN
-        let adv_normalized = adv_tensor.sub(&adv_mean).map_err(|e| Error::Training(e.to_string()))?
-            .div(&adv_std).map_err(|e| Error::Training(e.to_string()))?;
+        // Normalize Advantages - must do element-wise to avoid broadcasting issues
+        let adv_mean_val: f32 = adv_tensor.mean_all().map_err(|e| Error::Training(e.to_string()))?.to_scalar().map_err(|e| Error::Training(e.to_string()))?;
+        let adv_var = adv_tensor.var(0).map_err(|e| Error::Training(e.to_string()))?;
+        let adv_std_val: f32 = adv_var.sqrt().map_err(|e| Error::Training(e.to_string()))?.to_scalar().map_err(|e| Error::Training(e.to_string()))?;
+        let std_with_eps = adv_std_val + 1e-8;
+        
+        // Compute normalized advantages element-wise
+        let adv_norm_vec: Vec<f32> = advantages.iter().map(|a| (a - adv_mean_val) / std_with_eps).collect();
+        let adv_normalized = Tensor::from_vec(adv_norm_vec, (batch.size,), &self.device).map_err(|e| Error::Training(e.to_string()))?;
 
         // Constants Tensors
         let value_coef_tensor = Tensor::new(VALUE_COEF, &self.device).map_err(|e| Error::Training(e.to_string()))?;
@@ -289,3 +292,216 @@ impl LightningAlgorithm for PpoAlgorithm {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use abzu_lightning_core::{ObservationSpan, ActionSpan, RewardSpan};
+    use serde_json::json;
+
+    /// Helper to create a valid transition sequence
+    fn make_transition(features: [f64; 4], action: u64, reward: f64) -> Vec<Span> {
+        vec![
+            Span::Observation(ObservationSpan::new(json!({ "features": features }))),
+            Span::Action(ActionSpan::new(json!({ "action": action }))),
+            Span::Reward(RewardSpan::new(reward)),
+        ]
+    }
+
+    // ============ CONSTRUCTION TESTS ============
+
+    #[test]
+    fn test_ppo_creates_on_cpu() {
+        let algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu");
+        assert!(algo.is_ok(), "PPO should initialize on CPU");
+    }
+
+    #[test]
+    fn test_ppo_stores_hyperparameters() {
+        let algo = PpoAlgorithm::new(64, 10, 1e-3, 0.1, "cpu").unwrap();
+        assert_eq!(algo.input_dim, 64);
+        assert!((algo.clip_ratio - 0.1).abs() < 1e-6);
+    }
+
+    // ============ BATCH PROCESSING TESTS ============
+
+    #[test]
+    fn test_process_batch_rejects_empty() {
+        let algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        let result = algo.process_batch(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No valid transitions"));
+    }
+
+    #[test]
+    fn test_process_batch_rejects_dimension_mismatch() {
+        let algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        // 3 features but algo expects 4
+        let spans = vec![
+            Span::Observation(ObservationSpan::new(json!({ "features": [1.0, 2.0, 3.0] }))),
+            Span::Action(ActionSpan::new(json!({ "action": 0 }))),
+        ];
+        let result = algo.process_batch(&spans);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_process_batch_creates_correct_shapes() {
+        let algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        
+        let mut spans = Vec::new();
+        spans.extend(make_transition([1.0, 2.0, 3.0, 4.0], 0, 1.0));
+        spans.extend(make_transition([5.0, 6.0, 7.0, 8.0], 1, -1.0));
+        spans.extend(make_transition([0.1, 0.2, 0.3, 0.4], 0, 0.5));
+
+        let batch = algo.process_batch(&spans).unwrap();
+        
+        // PPO should have obs, next_obs, act, rew, done tensors
+        assert_eq!(batch.size, 2, "Two complete transitions (third is pending)");
+        assert_eq!(batch.obs.dims(), &[2, 4]);
+        assert_eq!(batch.next_obs.dims(), &[2, 4]);
+        assert_eq!(batch.act.dims(), &[2]);
+        assert_eq!(batch.rew.dims(), &[2]);
+        assert_eq!(batch.done.dims(), &[2]);
+    }
+
+    #[test]
+    fn test_extract_features_validates_dimension() {
+        let algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        
+        let valid = json!({ "features": [1.0, 2.0, 3.0, 4.0] });
+        assert!(algo.extract_features(&valid).is_ok());
+        
+        let invalid_dim = json!({ "features": [1.0, 2.0] });
+        let err = algo.extract_features(&invalid_dim).unwrap_err();
+        assert!(err.contains("mismatch"));
+        
+        let missing = json!({ "data": [1.0, 2.0, 3.0, 4.0] });
+        let err = algo.extract_features(&missing).unwrap_err();
+        assert!(err.contains("missing"));
+    }
+
+    // ============ TRAINING TESTS ============
+
+    #[tokio::test]
+    async fn test_train_returns_none_on_invalid_batch() {
+        let mut algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        let result = algo.train(&[]).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_train_returns_metrics() {
+        let mut algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        
+        let mut spans = Vec::new();
+        for i in 0..6 {
+            spans.extend(make_transition(
+                [i as f64 * 0.1, 0.2, 0.3, 0.4],
+                (i % 2) as u64,
+                if i % 2 == 0 { 1.0 } else { -1.0 }
+            ));
+        }
+
+        let result = algo.train(&spans).await.unwrap();
+        assert!(result.is_some());
+        
+        let metrics = result.unwrap();
+        assert!(metrics.metrics.contains_key("loss"));
+        assert!(metrics.metrics.contains_key("mean_reward"));
+        assert!(metrics.spans_processed > 0);
+    }
+
+    #[tokio::test]
+    async fn test_train_loss_is_finite() {
+        let mut algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        
+        let mut spans = Vec::new();
+        for i in 0..10 {
+            spans.extend(make_transition(
+                [i as f64 * 0.1, 0.2, 0.3, 0.4],
+                (i % 2) as u64,
+                if i % 2 == 0 { 1.0 } else { -1.0 }
+            ));
+        }
+
+        let result = algo.train(&spans).await.unwrap().unwrap();
+        let loss = *result.metrics.get("loss").unwrap();
+        
+        assert!(loss.is_finite(), "Loss must be finite, got {}", loss);
+    }
+
+    #[tokio::test]
+    async fn test_train_updates_model() {
+        let mut algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        
+        // Get initial output
+        let test_input = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0],
+            (1, 4),
+            &algo.device
+        ).unwrap();
+        let (initial_logits, _) = algo.model.forward(&test_input).unwrap();
+        let initial: Vec<f32> = initial_logits.to_vec2().unwrap()[0].clone();
+        
+        // Train
+        let mut spans = Vec::new();
+        for i in 0..20 {
+            spans.extend(make_transition(
+                [1.0, 2.0, 3.0, 4.0],
+                (i % 2) as u64,
+                if i % 2 == 0 { 1.0 } else { -1.0 }
+            ));
+        }
+        algo.train(&spans).await.unwrap();
+        
+        // Check output changed
+        let (updated_logits, _) = algo.model.forward(&test_input).unwrap();
+        let updated: Vec<f32> = updated_logits.to_vec2().unwrap()[0].clone();
+        
+        let changed = initial.iter().zip(updated.iter()).any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(changed, "Model weights should change after training");
+    }
+
+    // ============ MATHEMATICAL PROPERTY TESTS ============
+
+    #[test]
+    fn test_log_probs_are_valid() {
+        let algo = PpoAlgorithm::new(4, 3, 3e-4, 0.2, "cpu").unwrap();
+        
+        let obs = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 4), &algo.device).unwrap();
+        let (logits, _) = algo.model.forward(&obs).unwrap();
+        let actions = Tensor::from_vec(vec![1.0f32], (1,), &algo.device).unwrap();
+        
+        let log_probs = algo.get_log_probs(&logits, &actions).unwrap();
+        // get_log_probs returns [batch] shape
+        let log_prob_vec: Vec<f32> = log_probs.to_vec1().unwrap();
+        let val = log_prob_vec[0];
+        
+        // Log probabilities must be <= 0 and finite
+        assert!(val <= 0.0, "Log prob must be <= 0, got {}", val);
+        assert!(val.is_finite(), "Log prob must be finite");
+    }
+
+    #[test]
+    fn test_actor_critic_produces_values() {
+        let algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        
+        let obs = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 4), &algo.device).unwrap();
+        let (logits, values) = algo.model.forward(&obs).unwrap();
+        
+        // Logits should have shape [batch, action_dim]
+        assert_eq!(logits.dims(), &[1, 2]);
+        
+        // Values should have shape [batch, 1]
+        assert_eq!(values.dims(), &[1, 1]);
+    }
+
+    #[test]
+    fn test_update_policy_is_noop() {
+        let mut algo = PpoAlgorithm::new(4, 2, 3e-4, 0.2, "cpu").unwrap();
+        assert!(algo.update_policy(&[1, 2, 3]).is_ok());
+    }
+}
+
