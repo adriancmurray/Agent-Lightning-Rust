@@ -3,11 +3,12 @@ mod model;
 use crate::model::ActorCritic;
 use abzu_lightning_core::{LightningAlgorithm, Result, Error, Span, TrainingResult};
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, ops};
 
 const GAMMA: f32 = 0.99;
 const LAMBDA_GAE: f32 = 0.95;
 const VALUE_COEF: f32 = 0.5;
+const ENTROPY_COEF: f32 = 0.01;
 const EPOCHS: usize = 4;
 
 pub struct PpoAlgorithm {
@@ -15,7 +16,7 @@ pub struct PpoAlgorithm {
     model: ActorCritic,
     optimizer: AdamW,
     device: Device,
-    clip_ratio: f64,
+    clip_ratio: f64, // Config
     input_dim: usize,
     action_dim: usize,
 }
@@ -39,9 +40,11 @@ impl PpoAlgorithm {
         let vars = VarMap::new();
         let vb = VarBuilder::from_varmap(&vars, DType::F32, &device);
         
+        // Initialize Model
         let model = ActorCritic::new(vb, input_dim, action_dim)
             .map_err(|e| Error::Training(format!("Model creation failed: {}", e)))?;
 
+        // Initialize Optimizer
         let params = ParamsAdamW {
             lr: learning_rate,
             ..Default::default()
@@ -63,7 +66,7 @@ impl PpoAlgorithm {
     fn process_batch(&self, spans: &[Span]) -> std::result::Result<Batch, String> {
         let mut obs_vec: Vec<f32> = Vec::new();
         let mut act_vec: Vec<f32> = Vec::new(); // actions are indices
-        let mut rew_vec: Vec<f32> = Vec::new();
+        let mut rew_vec: Vec<f32> = Vec::new(); // rewards
         let mut next_obs_vec: Vec<f32> = Vec::new();
         let mut done_vec: Vec<f32> = Vec::new();
 
@@ -130,6 +133,30 @@ impl PpoAlgorithm {
              Err("Observation missing 'features' array".to_string())
         }
     }
+
+    /// Calculate log probs for specific actions using one-hot encoding
+    fn get_log_probs(&self, logits: &Tensor, actions: &Tensor) -> std::result::Result<Tensor, Error> {
+        let n_batch = logits.dim(0).map_err(|e| Error::Training(e.to_string()))?;
+        // actions is [B], logits is [B, A]
+        
+        // One-hot encode actions
+        // actions tensor is f32, need u32 for one_hot? Candle one_hot needs specific logic?
+        // Actually, candle doesn't have `one_hot` easily directly?
+        // Let's check `candle_nn::encoding::one_hot`? 
+        // No, standard way is manual or `gather`.
+        // Since `gather` is missing, let's look for `gather` equivalent logic.
+        // `logits.gather(indices, dim)` IS available in recent Candle versions!
+        // Let's try `gather`.
+        
+        let actions_u32 = actions.to_dtype(DType::U32).map_err(|e| Error::Training(e.to_string()))?;
+        let log_probs_all = ops::log_softmax(logits, 1).map_err(|e| Error::Training(e.to_string()))?;
+        
+        // gather expects actions to be [B, 1] for dim 1 gather?
+        let actions_unsq = actions_u32.unsqueeze(1).map_err(|e| Error::Training(e.to_string()))?;
+        let selected_log_probs = log_probs_all.gather(&actions_unsq, 1).map_err(|e| Error::Training(e.to_string()))?;
+        
+        selected_log_probs.squeeze(1).map_err(|e| Error::Training(e.to_string()))
+    }
 }
 
 struct Batch {
@@ -151,7 +178,15 @@ impl LightningAlgorithm for PpoAlgorithm {
             }
         };
 
-        // GAE Calculation (CPU side with f32)
+        // 1. Initial Forward Pass (No grad) - Calculate Old Log Probs
+        // We need this to hold `old_log_probs` constant during epochs
+        let old_log_probs = {
+            let (logits, _values) = self.model.forward(&batch.obs).map_err(|e| Error::Training(format!("Forward: {}", e)))?;
+            let probs = self.get_log_probs(&logits, &batch.act).map_err(|e| Error::Training(format!("LogProbs: {}", e)))?;
+            probs.detach() // Detach from graph explicitly
+        };
+
+        // 2. GAE Calculation
         let (_logits, values) = self.model.forward(&batch.obs).map_err(|e| Error::Training(format!("Forward: {}", e)))?;
         let (_next_logits, next_values) = self.model.forward(&batch.next_obs).map_err(|e| Error::Training(format!("Next Forward: {}", e)))?;
         
@@ -171,26 +206,72 @@ impl LightningAlgorithm for PpoAlgorithm {
             returns[t] = advantages[t] + values_vec[t];
         }
         
-        // Tensorize Returns for loss
+        // Tensorize
+        let adv_tensor = Tensor::from_vec(advantages, (batch.size,), &self.device).map_err(|e| Error::Training(e.to_string()))?;
         let ret_tensor = Tensor::from_vec(returns, (batch.size,), &self.device).map_err(|e| Error::Training(e.to_string()))?;
 
-        // Value Coefficient Tensor
-        let value_coef_tensor = Tensor::new(VALUE_COEF, &self.device).map_err(|e| Error::Training(e.to_string()))?;
+        // Normalize Advantages
+        let adv_mean = adv_tensor.mean_all().map_err(|e| Error::Training(e.to_string()))?;
+        let adv_std = adv_tensor.var(0).map_err(|e| Error::Training(e.to_string()))?.sqrt().map_err(|e| Error::Training(e.to_string()))?;
+        // Add small epsilon to std prevents NaN
+        let adv_normalized = adv_tensor.sub(&adv_mean).map_err(|e| Error::Training(e.to_string()))?
+            .div(&adv_std).map_err(|e| Error::Training(e.to_string()))?;
 
-        // K Epochs
+        // Constants Tensors
+        let value_coef_tensor = Tensor::new(VALUE_COEF, &self.device).map_err(|e| Error::Training(e.to_string()))?;
+        let entropy_coef_tensor = Tensor::new(ENTROPY_COEF, &self.device).map_err(|e| Error::Training(e.to_string()))?;
+        let one_tensor = Tensor::new(1.0f32, &self.device).map_err(|e| Error::Training(e.to_string()))?;
+
+
         let mut total_loss_val = 0.0;
         
         for _ in 0..EPOCHS {
-            let (_logits, values) = self.model.forward(&batch.obs).map_err(|e| Error::Training(e.to_string()))?;
+            let (logits, values) = self.model.forward(&batch.obs).map_err(|e| Error::Training(e.to_string()))?;
             let values = values.squeeze(1).map_err(|e| Error::Training(e.to_string()))?;
+            
+            // New Log Probs
+            let new_log_probs = self.get_log_probs(&logits, &batch.act)?;
+
+            // Ratio = (new - old).exp()
+            let ratio = (new_log_probs.sub(&old_log_probs).map_err(|e| Error::Training(e.to_string()))?)
+                .exp().map_err(|e| Error::Training(e.to_string()))?;
+            
+            // Surrogate 1 = ratio * adv
+            let surr1 = ratio.mul(&adv_normalized).map_err(|e| Error::Training(e.to_string()))?;
+            
+            // Surrogate 2 = clamp(ratio) * adv
+            // Clamp logic: clamp(ratio, 1-eps, 1+eps)
+            let clip = self.clip_ratio as f32;
+            let ratio_clamped = ratio.clamp(1.0 - clip, 1.0 + clip).map_err(|e| Error::Training(e.to_string()))?;
+            let surr2 = ratio_clamped.mul(&adv_normalized).map_err(|e| Error::Training(e.to_string()))?;
+            
+            // Policy Loss = -min(surr1, surr2).mean()
+            let policy_loss = surr1.minimum(&surr2).map_err(|e| Error::Training(e.to_string()))?
+                .neg().map_err(|e| Error::Training(e.to_string()))?
+                .mean_all().map_err(|e| Error::Training(e.to_string()))?;
             
             // Value Loss
             let v_loss = (values.sub(&ret_tensor).map_err(|e| Error::Training(e.to_string()))?
                         .powf(2.0).map_err(|e| Error::Training(e.to_string()))?)
                         .mean_all().map_err(|e| Error::Training(e.to_string()))?;
             
-            // Total Loss (Currently only V-Loss enabled for scaffolding)
-            let loss = v_loss.mul(&value_coef_tensor).map_err(|e| Error::Training(e.to_string()))?;
+            // Entropy Loss = -(-probs * log_probs).sum.mean
+            // entropy = -(probs * log_probs).sum(-1)
+            let probs = ops::softmax(&logits, 1).map_err(|e| Error::Training(e.to_string()))?;
+            let log_probs_all = ops::log_softmax(&logits, 1).map_err(|e| Error::Training(e.to_string()))?;
+            let entropy = (probs.mul(&log_probs_all).map_err(|e| Error::Training(e.to_string()))?)
+                .sum(1).map_err(|e| Error::Training(e.to_string()))?
+                .neg().map_err(|e| Error::Training(e.to_string()))?
+                .mean_all().map_err(|e| Error::Training(e.to_string()))?;
+
+            // Total Loss
+            // loss = policy_loss + 0.5 * value_loss - 0.01 * entropy
+            // Note: Entropy term is usually SUBTRACTED from loss because we want to Maximize entropy
+            // Minimize (Loss - Entropy). So `loss - coef * entropy`.
+            
+            let loss = policy_loss
+                .add(&v_loss.mul(&value_coef_tensor).map_err(|e| Error::Training(e.to_string()))?).map_err(|e| Error::Training(e.to_string()))?
+                .sub(&entropy.mul(&entropy_coef_tensor).map_err(|e| Error::Training(e.to_string()))?).map_err(|e| Error::Training(e.to_string()))?;
 
             self.optimizer.backward_step(&loss).map_err(|e| Error::Training(format!("Backward: {}", e)))?;
             
