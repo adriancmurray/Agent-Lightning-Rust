@@ -60,9 +60,13 @@ impl Trainer {
         algorithm: &mut A,
     ) -> Result<Option<TrainingResult>> {
         // Query spans based on config
-        let mut spans = if let Some(task_id) = &self.config.task_id {
+        let spans = if let Some(task_id) = &self.config.task_id {
             debug!("Querying spans for task: {}", task_id);
-            self.store.query_task_since(task_id, self.last_processed_cursor)?
+            self.store.query_task_since(
+                task_id, 
+                self.last_processed_cursor,
+                self.config.batch_size
+            )?
         } else if let Some(agent_id) = &self.config.agent_id {
             // TODO: implementing query_agent_since would be symmetric
             // For now, minimal support only for tasks which is primary use case
@@ -78,10 +82,7 @@ impl Trainer {
             return Ok(None);
         }
 
-        // Apply batch size limit
-        if spans.len() > self.config.batch_size {
-            spans.truncate(self.config.batch_size);
-        }
+        // Limit is already applied by query_task_since per batch_size
 
         let count = spans.len();
         info!("Training on {} new spans", count);

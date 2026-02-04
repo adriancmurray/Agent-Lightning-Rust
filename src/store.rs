@@ -58,14 +58,15 @@ impl LightningStore {
 
     /// Query all spans for a specific task
     pub fn query_task(&self, task_id: &str) -> Result<Vec<Span>> {
-        self.query_task_since(task_id, None)
+        self.query_task_since(task_id, None, usize::MAX)
     }
 
     /// Query spans for a task since a specific cursor (timestamp, uuid)
     pub fn query_task_since(
         &self, 
         task_id: &str, 
-        cursor: Option<(DateTime<Utc>, uuid::Uuid)>
+        cursor: Option<(DateTime<Utc>, uuid::Uuid)>,
+        limit: usize,
     ) -> Result<Vec<Span>> {
         let task_tree = self.db.open_tree(format!("task:{}", task_id))?;
         let mut spans = Vec::new();
@@ -73,15 +74,12 @@ impl LightningStore {
         let start_key = if let Some((dt, id)) = cursor {
             let ts = dt.timestamp_nanos_opt().unwrap_or(0);
             // Start strictly after the cursor: append a byte larger than any valid key suffix
-            // or just append \0 if we want to separate? 
-            // format! ends with uuid. appending \0 makes it longer, which is > if prefix matches.
-            // Wait, "a" < "a\0". Yes.
             format!("{:019}_{}\0", ts, id) 
         } else {
             "".to_string()
         };
 
-        for item in task_tree.range(start_key.as_bytes()..) {
+        for item in task_tree.range(start_key.as_bytes()..).take(limit) {
             let (_index_key, main_key) = item?;
             if let Some(span_data) = self.db.get(&main_key)? {
                 let span: Span = serde_json::from_slice(&span_data)?;
