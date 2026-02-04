@@ -27,6 +27,7 @@ tracing = "0.1"
 
 # UUID generation for span IDs
 uuid = { version = "1.0", features = ["v4", "serde"] }
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3.0"

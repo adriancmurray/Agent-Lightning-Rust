@@ -9,7 +9,7 @@ pub mod store;
 pub mod trainer;
 
 // Re-export core types
-pub use algorithm::{LightningAlgorithm, TrainingResult};
+pub use algorithm::{LightningAlgorithm, TrainingResult, LlmBackend};
 pub use collector::SpanCollector;
 pub use span::{ActionSpan, ObservationSpan, RewardSpan, Span};
 pub use store::LightningStore;

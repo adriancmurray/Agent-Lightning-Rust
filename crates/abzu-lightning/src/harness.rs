@@ -1,4 +1,4 @@
-use abzu_lightning_core::{LightningStore, Trainer, TrainerConfig, LightningAlgorithm};
+use abzu_lightning_core::{LightningStore, Trainer, TrainerConfig, LightningAlgorithm, LlmBackend};
 use crate::{BrainFactory, AlgorithmConfig};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -8,6 +8,7 @@ pub struct TrainingHarness {
     trainer: Arc<RwLock<Trainer>>,
     algorithm: Arc<RwLock<Box<dyn LightningAlgorithm>>>,
     running: Arc<std::sync::atomic::AtomicBool>,
+    llm_backend: Option<Arc<dyn LlmBackend>>,
 }
 
 impl TrainingHarness {
@@ -15,13 +16,14 @@ impl TrainingHarness {
     pub fn new(
         store_path: impl AsRef<std::path::Path>,
         algo_config: AlgorithmConfig,
-        trainer_config: TrainerConfig
+        trainer_config: TrainerConfig,
+        llm_backend: Option<Arc<dyn LlmBackend>>,
     ) -> anyhow::Result<Self> {
         // Initialize Store
         let store = Arc::new(LightningStore::open(store_path)?);
 
         // Hydrate Algorithm via Factory
-        let algorithm = BrainFactory::build(&algo_config)?;
+        let algorithm = BrainFactory::build(&algo_config, llm_backend.clone())?;
         
         // Initialize Trainer
         let trainer = Trainer::new(store, trainer_config);
@@ -30,6 +32,7 @@ impl TrainingHarness {
             trainer: Arc::new(RwLock::new(trainer)),
             algorithm: Arc::new(RwLock::new(algorithm)),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            llm_backend,
         })
     }
 
@@ -80,7 +83,7 @@ impl TrainingHarness {
 
     /// Hot-swap the brain at runtime
     pub async fn swap_algorithm(&self, new_config: AlgorithmConfig) -> anyhow::Result<()> {
-        let new_brain = BrainFactory::build(&new_config)?;
+        let new_brain = BrainFactory::build(&new_config, self.llm_backend.clone())?;
         let mut algo_guard = self.algorithm.write().await;
         *algo_guard = new_brain;
         tracing::info!("Algorithm hot-swapped successfully");

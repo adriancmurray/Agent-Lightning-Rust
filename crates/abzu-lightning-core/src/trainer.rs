@@ -92,16 +92,18 @@ impl Trainer {
              self.last_processed_cursor = Some((last_span.timestamp(), last_span.id()));
         }
 
-        let result = algorithm.train(&spans)?;
+        let result_opt = algorithm.train(&spans).await?;
 
         // Store updated weights if provided
-        if let Some(weights) = &result.updated_weights {
-            let key = format!("weights_{}", Utc::now().timestamp());
-            self.store.store_resource(&key, weights)?;
-            debug!("Stored updated weights: {}", key);
+        if let Some(result) = &result_opt {
+            if let Some(weights) = &result.updated_weights {
+                let key = format!("weights_{}", Utc::now().timestamp());
+                self.store.store_resource(&key, weights)?;
+                debug!("Stored updated weights: {}", key);
+            }
         }
 
-        Ok(Some(result))
+        Ok(result_opt)
     }
     
     // ... remainder of file unchanged ...

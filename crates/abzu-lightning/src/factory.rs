@@ -1,4 +1,4 @@
-use abzu_lightning_core::{LightningAlgorithm, algorithm::RewardAggregator, Result, Error};
+use abzu_lightning_core::{LightningAlgorithm, algorithm::RewardAggregator, Result, Error, LlmBackend};
 use serde::Deserialize;
 
 /// Configuration for the Algorithm Selection
@@ -18,9 +18,9 @@ pub enum AlgorithmConfig {
         group_size: usize,
         beta: f64,
     },
-    /// Agent Policy Optimization (Future)
+    /// Agent Policy Optimization
     Apo {
-        param: f64,
+        initial_prompt: String,
     },
     /// Simple Reward Aggregation (Baseline)
     Aggregator {
@@ -36,8 +36,10 @@ pub enum AlgorithmConfig {
 /// The Brain Factory: Hydrates a static config into a dynamic brain
 pub struct BrainFactory;
 
+use std::sync::Arc;
+
 impl BrainFactory {
-    pub fn build(config: &AlgorithmConfig) -> Result<Box<dyn LightningAlgorithm>> {
+    pub fn build(config: &AlgorithmConfig, llm_backend: Option<Arc<dyn LlmBackend>>) -> Result<Box<dyn LightningAlgorithm>> {
         match config {
             AlgorithmConfig::Ppo { input_dim, action_dim, learning_rate, clip_range, device } => {
                 #[cfg(feature = "ppo")]
@@ -57,8 +59,19 @@ impl BrainFactory {
             AlgorithmConfig::Grpo { .. } => {
                 Err(Error::Training("GRPO algorithm not yet implemented".to_string()))
             }
-            AlgorithmConfig::Apo { .. } => {
-                Err(Error::Training("APO algorithm not yet implemented".to_string()))
+            AlgorithmConfig::Apo { initial_prompt } => {
+                #[cfg(feature = "apo")]
+                {
+                    use abzu_lightning_apo::ApoAlgorithm;
+                    let backend = llm_backend.ok_or_else(|| Error::Training("APO requires an LlmBackend".to_string()))?;
+                    let brain = ApoAlgorithm::new(initial_prompt.clone(), backend);
+                    Ok(Box::new(brain))
+                }
+                #[cfg(not(feature = "apo"))]
+                {
+                    let _ = (initial_prompt, llm_backend);
+                    Err(Error::Training("APO feature not enabled. Add 'apo' feature to abzu-lightning.".to_string()))
+                }
             }
             AlgorithmConfig::Aggregator { window_size } => {
                 let algo = RewardAggregator::new(Some(*window_size));

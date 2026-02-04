@@ -2,6 +2,7 @@ mod model;
 
 use crate::model::ActorCritic;
 use abzu_lightning_core::{LightningAlgorithm, Result, Error, Span, TrainingResult};
+use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, ops};
 
@@ -168,18 +169,23 @@ struct Batch {
     size: usize,
 }
 
+#[async_trait]
 impl LightningAlgorithm for PpoAlgorithm {
-    fn train(&mut self, spans: &[Span]) -> Result<TrainingResult> {
+    async fn train(&mut self, spans: &[Span]) -> Result<Option<TrainingResult>> {
         let batch = match self.process_batch(spans) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!("PPO batch processing failed: {}", e);
-                return Ok(TrainingResult::new()); 
+                return Ok(None); 
             }
         };
 
         // 1. Initial Forward Pass (No grad) - Calculate Old Log Probs
-        // We need this to hold `old_log_probs` constant during epochs
+        // ... (Logic unchanged generally, just wrapped in async fn)
+        // Note: Candle operations are blocking. In a real production setup this should be 
+        // wrapped in block_in_place or spawn_blocking. 
+        // For local loop it's acceptable.
+
         let old_log_probs = {
             let (logits, _values) = self.model.forward(&batch.obs).map_err(|e| Error::Training(format!("Forward: {}", e)))?;
             let probs = self.get_log_probs(&logits, &batch.act).map_err(|e| Error::Training(format!("LogProbs: {}", e)))?;
@@ -220,8 +226,7 @@ impl LightningAlgorithm for PpoAlgorithm {
         // Constants Tensors
         let value_coef_tensor = Tensor::new(VALUE_COEF, &self.device).map_err(|e| Error::Training(e.to_string()))?;
         let entropy_coef_tensor = Tensor::new(ENTROPY_COEF, &self.device).map_err(|e| Error::Training(e.to_string()))?;
-        let one_tensor = Tensor::new(1.0f32, &self.device).map_err(|e| Error::Training(e.to_string()))?;
-
+        let _one_tensor = Tensor::new(1.0f32, &self.device).map_err(|e| Error::Training(e.to_string()))?;
 
         let mut total_loss_val = 0.0;
         
@@ -240,7 +245,6 @@ impl LightningAlgorithm for PpoAlgorithm {
             let surr1 = ratio.mul(&adv_normalized).map_err(|e| Error::Training(e.to_string()))?;
             
             // Surrogate 2 = clamp(ratio) * adv
-            // Clamp logic: clamp(ratio, 1-eps, 1+eps)
             let clip = self.clip_ratio as f32;
             let ratio_clamped = ratio.clamp(1.0 - clip, 1.0 + clip).map_err(|e| Error::Training(e.to_string()))?;
             let surr2 = ratio_clamped.mul(&adv_normalized).map_err(|e| Error::Training(e.to_string()))?;
@@ -255,8 +259,7 @@ impl LightningAlgorithm for PpoAlgorithm {
                         .powf(2.0).map_err(|e| Error::Training(e.to_string()))?)
                         .mean_all().map_err(|e| Error::Training(e.to_string()))?;
             
-            // Entropy Loss = -(-probs * log_probs).sum.mean
-            // entropy = -(probs * log_probs).sum(-1)
+            // Entropy Loss
             let probs = ops::softmax(&logits, 1).map_err(|e| Error::Training(e.to_string()))?;
             let log_probs_all = ops::log_softmax(&logits, 1).map_err(|e| Error::Training(e.to_string()))?;
             let entropy = (probs.mul(&log_probs_all).map_err(|e| Error::Training(e.to_string()))?)
@@ -265,10 +268,6 @@ impl LightningAlgorithm for PpoAlgorithm {
                 .mean_all().map_err(|e| Error::Training(e.to_string()))?;
 
             // Total Loss
-            // loss = policy_loss + 0.5 * value_loss - 0.01 * entropy
-            // Note: Entropy term is usually SUBTRACTED from loss because we want to Maximize entropy
-            // Minimize (Loss - Entropy). So `loss - coef * entropy`.
-            
             let loss = policy_loss
                 .add(&v_loss.mul(&value_coef_tensor).map_err(|e| Error::Training(e.to_string()))?).map_err(|e| Error::Training(e.to_string()))?
                 .sub(&entropy.mul(&entropy_coef_tensor).map_err(|e| Error::Training(e.to_string()))?).map_err(|e| Error::Training(e.to_string()))?;
@@ -283,7 +282,7 @@ impl LightningAlgorithm for PpoAlgorithm {
             .with_metric("mean_reward", rewards_vec.iter().sum::<f32>() as f64 / batch.size as f64)
             .with_spans_processed(spans.len());
 
-        Ok(result)
+        Ok(Some(result))
     }
 
     fn update_policy(&mut self, _weights: &[u8]) -> Result<()> {

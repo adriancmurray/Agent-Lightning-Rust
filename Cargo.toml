@@ -3,5 +3,6 @@ resolver = "2"
 members = [
     "crates/abzu-lightning-core",
     "crates/abzu-lightning-ppo",
+    "crates/abzu-lightning-apo",
     "crates/abzu-lightning"
 ]

@@ -3,6 +3,15 @@
 use crate::{Result, Span};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use async_trait::async_trait;
+
+// Verification: Async trait enabled
+/// LLM Backend interface for Prompt Optimization
+#[async_trait]
+pub trait LlmBackend: Send + Sync {
+    async fn generate(&self, prompt: &str) -> anyhow::Result<String>;
+}
+
 
 /// Result of a training iteration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,9 +61,11 @@ impl Default for TrainingResult {
 }
 
 /// Trait for reinforcement learning algorithms
+#[async_trait]
 pub trait LightningAlgorithm: Send + Sync {
     /// Train on a batch of spans
-    fn train(&mut self, spans: &[Span]) -> Result<TrainingResult>;
+    /// Returns None if no training happened (e.g. APO filtering)
+    async fn train(&mut self, spans: &[Span]) -> Result<Option<TrainingResult>>;
 
     /// Update the policy with new weights
     fn update_policy(&mut self, weights: &[u8]) -> Result<()>;
@@ -111,8 +122,9 @@ impl Default for RewardAggregator {
     }
 }
 
+#[async_trait]
 impl LightningAlgorithm for RewardAggregator {
-    fn train(&mut self, spans: &[Span]) -> Result<TrainingResult> {
+    async fn train(&mut self, spans: &[Span]) -> Result<Option<TrainingResult>> {
         let mut local_total = 0.0;
         let mut local_count = 0;
 
@@ -142,7 +154,7 @@ impl LightningAlgorithm for RewardAggregator {
             .with_metric("reward_window_count", self.rewards.len() as f64)
             .with_spans_processed(spans.len());
 
-        Ok(result)
+        Ok(Some(result))
     }
 
     fn update_policy(&mut self, _weights: &[u8]) -> Result<()> {
@@ -163,8 +175,8 @@ mod tests {
     use crate::{RewardSpan, ObservationSpan};
     use serde_json::json;
 
-    #[test]
-    fn test_reward_aggregator() {
+    #[tokio::test]
+    async fn test_reward_aggregator() {
         let mut algo = RewardAggregator::default();
 
         let spans = vec![
@@ -174,7 +186,9 @@ mod tests {
             Span::Reward(RewardSpan::new(-0.5)),
         ];
 
-        let result = algo.train(&spans).unwrap();
+        // Must await
+        let result_opt = algo.train(&spans).await.unwrap();
+        let result = result_opt.unwrap();
 
         assert_eq!(result.spans_processed, 4);
         assert_eq!(algo.count(), 3);
@@ -182,12 +196,12 @@ mod tests {
         assert!((algo.mean_reward() - 0.333333).abs() < 0.001);
     }
 
-    #[test]
-    fn test_algorithm_reset() {
+    #[tokio::test]
+    async fn test_algorithm_reset() {
         let mut algo = RewardAggregator::default();
         let spans = vec![Span::Reward(RewardSpan::new(1.0))];
 
-        algo.train(&spans).unwrap();
+        algo.train(&spans).await.unwrap();
         assert_eq!(algo.count(), 1);
 
         algo.reset().unwrap();
