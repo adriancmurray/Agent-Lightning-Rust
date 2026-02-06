@@ -13,14 +13,15 @@ const ENTROPY_COEF: f32 = 0.01;
 // KL penalty is often used in GRPO but we stick to PPO-clip style for now
 
 pub struct GrpoAlgorithm {
-    _vars: VarMap,
+    vars: VarMap,
     model: Actor,
     optimizer: AdamW,
     device: Device,
     input_dim: usize,
-    _action_dim: usize,
+    action_dim: usize,
     _group_size: usize, 
 }
+
 
 impl GrpoAlgorithm {
     pub fn new(
@@ -45,17 +46,37 @@ impl GrpoAlgorithm {
             .map_err(|e| Error::Training(format!("Optimizer creation failed: {}", e)))?;
 
         Ok(Self {
-            _vars: vars,
+            vars,
             model,
             optimizer,
             device,
             input_dim,
-            _action_dim: action_dim,
+            action_dim,
             _group_size: group_size,
         })
     }
 
+    /// Save checkpoint to a safetensors file
+    pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
+        self.vars.save(path)
+            .map_err(|e| Error::Training(format!("Failed to save checkpoint: {}", e)))
+    }
+
+    /// Load checkpoint from a safetensors file
+    pub fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<()> {
+        self.vars.load(path)
+            .map_err(|e| Error::Training(format!("Failed to load checkpoint: {}", e)))?;
+        
+        // Rebuild model with loaded weights
+        let vb = VarBuilder::from_varmap(&self.vars, DType::F32, &self.device);
+        self.model = Actor::new(vb, self.input_dim, self.action_dim)
+            .map_err(|e| Error::Training(format!("Failed to rebuild model: {}", e)))?;
+        
+        Ok(())
+    }
+
     /// Calculate log probs for specific actions
+
     fn get_log_probs(&self, logits: &Tensor, actions: &Tensor) -> std::result::Result<Tensor, Error> {
         let actions_u32 = actions.to_dtype(DType::U32).map_err(|e| Error::Training(e.to_string()))?;
         let log_probs_all = ops::log_softmax(logits, 1).map_err(|e| Error::Training(e.to_string()))?;
